@@ -1,0 +1,91 @@
+# FairCore AI — GitHub 贡献自动记录 Action
+# ============================================================
+# 用途：PR merge 后自动把贡献数据上报到 FairCore API
+# 让团队成员的代码贡献自动进入 DSCE 股权计算
+#
+# 使用方式：
+#   1. 在你的仓库创建 .github/workflows/faircore-contribution.yml
+#   2. 配置 Secrets（见下方 env 注释）
+#   3. 每次 PR merge 自动运行
+#
+# 环境变量（Repository Secrets）：
+#   FAIRCORE_API_URL    - FairCore API 地址（默认 https://api.faircore.ai）
+#   FAIRCORE_API_KEY    - API Key（团队成员身份）
+#   FAIRCORE_PROJECT_ID - 项目 ID（从 FairCore 控制台获取）
+# ============================================================
+
+name: FairCore Contribution Auto-Record
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main, master, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  record-contribution:
+    # 只在 PR 真正合并时记录（closed + merged）
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 需要完整历史计算变更行数
+
+      - name: Calculate contribution stats
+        id: stats
+        shell: bash
+        run: |
+          # 计算本 PR 的变更行数（diff 统计）
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          DIFF_STATS=$(git diff --shortstat "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || echo "")
+          echo "diff_stats: $DIFF_STATS"
+          # 解析 "+X -Y" 或 "+X" 格式
+          ADDED=$(echo "$DIFF_STATS" | grep -oP '\d+(?= insertion)' || echo 0)
+          DELETED=$(echo "$DIFF_STATS" | grep -oP '\d+(?= deletion)' || echo 0)
+          # 行数转工时估算（~30 行/小时，含设计/评审时间）
+          HOURS=$(python3 -c "print(max(0.5, round(($ADDED+$DELETED)/30, 1)))" 2>/dev/null || echo "1.0")
+          echo "added=$ADDED" >> $GITHUB_OUTPUT
+          echo "deleted=$DELETED" >> $GITHUB_OUTPUT
+          echo "hours=$HOURS" >> $GITHUB_OUTPUT
+
+      - name: Record contribution to FairCore
+        env:
+          API_URL: ${{ secrets.FAIRCORE_API_URL || 'https://api.faircore.ai' }}
+          API_KEY: ${{ secrets.FAIRCORE_API_KEY }}
+          PROJECT_ID: ${{ secrets.FAIRCORE_PROJECT_ID }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          HOURS: ${{ steps.stats.outputs.hours }}
+        run: |
+          if [ -z "$API_KEY" ] || [ -z "$PROJECT_ID" ]; then
+            echo "::warning::FAIRCORE_API_KEY or FAIRCORE_PROJECT_ID not set, skipping"
+            exit 0
+          fi
+
+          # 查找或创建成员（以 GitHub 用户名为 member_id）
+          MEMBER_RESP=$(curl -s -X POST "$API_URL/api/v1/projects/$PROJECT_ID/members" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: $API_KEY" \
+            -d "{\"name\":\"$AUTHOR\",\"role\":\"developer\"}")
+
+          # 记录贡献（时间类，value=工时）
+          CONTRIB_RESP=$(curl -s -X POST "$API_URL/api/v1/projects/$PROJECT_ID/contributions" \
+            -H "Content-Type: application/json" \
+            -H "X-API-Key: $API_KEY" \
+            -d "{
+              \"member_id\": \"$AUTHOR\",
+              \"ctype\": \"time\",
+              \"value\": $HOURS,
+              \"stage\": \"growth\",
+              \"note\": \"PR: $PR_TITLE ($PR_URL)\"
+            }")
+
+          echo "Contribution recorded: $CONTRIB_RESP"
+          echo "✅ PR #${{ github.event.pull_request.number }} contributed $HOURS hours to FairCore project $PROJECT_ID"
