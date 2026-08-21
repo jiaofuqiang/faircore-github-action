@@ -69,11 +69,11 @@ jobs:
             exit 0
           fi
 
-          # 查找或创建成员（以 GitHub 用户名为 member_id）
-          MEMBER_RESP=$(curl -s -X POST "$API_URL/api/v1/projects/$PROJECT_ID/members" \
+          # 查找或创建成员（POST /api/members，body 含 project_id；返回 u_xxx id）
+          MEMBER_RESP=$(curl -s -X POST "$API_URL/api/v1/members" \
             -H "Content-Type: application/json" \
             -H "X-API-Key: $API_KEY" \
-            -d "{\"name\":\"$AUTHOR\",\"role\":\"developer\"}")
+            -d "{\"name\":\"$AUTHOR\",\"role\":\"developer\",\"project_id\":\"$PROJECT_ID\"}")
           # 提取成员 id（后端返回 u_xxx；解析失败回退 GitHub 用户名）
           MEMBER_ID=$(echo "$MEMBER_RESP" | python3 -c "import sys,json;print(json.load(sys.stdin).get('id') or '')" 2>/dev/null || true)
           [ -z "$MEMBER_ID" ] && MEMBER_ID="$AUTHOR"
